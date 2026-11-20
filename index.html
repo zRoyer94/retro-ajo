@@ -339,7 +339,8 @@ select{background:#0d0f1e;border:1px solid var(--line);color:var(--ink);padding:
     <div id="salaBox">
       <div class="ptitle">Sala compartida</div>
       <p class="phint" style="margin-bottom:12px">Esta pagina esta en modo local: lo que escribas no lo vera nadie mas. Crea una sala para que todo el equipo trabaje junto.</p>
-      <button class="btn primary" id="crearSala">Crear sala compartida</button>
+      <input class="note" id="salaMail" placeholder="tu correo (lo pide kvdb para crear la sala)" style="max-width:360px;margin-bottom:10px">
+      <div><button class="btn primary" id="crearSala">Crear sala compartida</button></div>
     </div>
   </div>
 
@@ -750,22 +751,38 @@ async function blobPut(data){
 }
 async function crearSala(){
   const b=$('#crearSala'); if(b){b.disabled=true;b.textContent='Creando...'}
-  try{
-    const r=await fetch(KV,{method:'POST',body:'email=retro-ajo@example.com'});
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const id=(await r.text()).trim();
-    if(!id||id.length>80)throw new Error('respuesta inesperada');
-    const url=location.origin+location.pathname+'?room='+id;
-    $('#salaBox').innerHTML='<div class="ptitle" style="margin-bottom:6px">Sala creada - comparte este enlace</div>'+
-      '<input class="note" id="salaUrl" readonly style="font-size:13px;padding:10px">'+
-      '<div class="row"><button class="btn sm ok" id="copiarSala">Copiar enlace</button>'+
-      '<button class="btn sm primary" id="irSala">Entrar ahora</button></div>';
-    $('#salaUrl').value=url;
-    $('#copiarSala').onclick=()=>{const i=$('#salaUrl');i.select();try{navigator.clipboard.writeText(i.value)}catch(e){}};
-    $('#irSala').onclick=()=>{location.href=url};
-  }catch(e){
-    $('#salaBox').textContent='No se pudo crear la sala: '+(e&&e.message?e.message:e);
+  const mail=(($('#salaMail')&&$('#salaMail').value)||'').trim();
+  const intentos=[
+    ()=>fetch(KV,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+         body:'email='+encodeURIComponent(mail)}),
+    ()=>fetch(KV,{method:'POST',body:'email='+encodeURIComponent(mail)}),
+    ()=>fetch(KV,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:''}),
+    ()=>fetch(KV,{method:'POST'})
+  ];
+  const fallos=[];
+  for(let i=0;i<intentos.length;i++){
+    try{
+      const r=await intentos[i]();
+      const t=(await r.text()).trim();
+      if(r.ok&&t&&t.length<80&&!/\s/.test(t)){
+        const url=location.origin+location.pathname+'?room='+t;
+        $('#salaBox').innerHTML='<div class="ptitle" style="margin-bottom:6px">Sala creada - comparte este enlace</div>'+
+          '<input class="note" id="salaUrl" readonly style="font-size:13px;padding:10px">'+
+          '<div class="row"><button class="btn sm ok" id="copiarSala">Copiar enlace</button>'+
+          '<button class="btn sm primary" id="irSala">Entrar ahora</button></div>';
+        $('#salaUrl').value=url;
+        $('#copiarSala').onclick=()=>{const q=$('#salaUrl');q.select();try{navigator.clipboard.writeText(q.value)}catch(e){}};
+        $('#irSala').onclick=()=>{location.href=url};
+        return;
+      }
+      fallos.push('#'+(i+1)+' HTTP '+r.status+' '+t.slice(0,60));
+    }catch(e){fallos.push('#'+(i+1)+' '+(e&&e.message?e.message:e))}
   }
+  $('#salaBox').innerHTML='<div class="ptitle" style="margin-bottom:8px">No se pudo crear la sala</div>'+
+    '<pre style="white-space:pre-wrap;font:500 12px monospace;color:#ffb0c0;margin-bottom:10px"></pre>'+
+    '<button class="btn sm" id="reintentar">Reintentar</button>';
+  $('#salaBox').querySelector('pre').textContent=fallos.join('\n');
+  $('#reintentar').onclick=()=>location.reload();
 }
 function startBlob(){
   Sync.on=true; Sync.mode='blob'; liveBadge();
