@@ -631,16 +631,20 @@ function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify(Object.assign(s
 function save(){saveLocal();queueSync()}
 
 /* ====== SINCRONIZACIÓN EN VIVO (servidor local, sin cuentas) ====== */
-const Sync={on:false,mode:'local',cid:uid(),clients:1,t:null,hold:false,rev:-1,poll:null,es:null,got:false};
+const Sync={on:false,mode:'local',dirty:false,err:0,sig:'',t2:null,push:null,cid:uid(),clients:1,t:null,hold:false,rev:-1,poll:null,es:null,got:false};
 function liveBadge(){
   const el=$('#live'); if(!el)return;
   el.classList.toggle('on',Sync.on);
-  el.textContent=Sync.on?(Sync.mode==='gas'?'🟢 En vivo':`🟢 En vivo · ${Sync.clients} conectado${Sync.clients===1?'':'s'}`):'🔵 Local';
+  el.textContent=!Sync.on?'🔵 Local'
+    :(Sync.err>2?'🔴 Sin conexión con la sala'
+    :(Sync.mode==='blob'?'🟢 En vivo · sala compartida'
+    :(Sync.mode==='gas'?'🟢 En vivo':`🟢 En vivo · ${Sync.clients} conectado${Sync.clients===1?'':'s'}`)));
   el.title=Sync.on?'Todos los que abrieron este enlace ven los cambios al instante.'
     :'Esta página guarda solo en este navegador. Para tiempo real, ábrela desde el servidor (server.js).';
 }
 function pushOp(op,data){
   if(!Sync.on)return;
+  if(Sync.mode==='blob'){Sync.dirty=true;clearTimeout(Sync.t2);Sync.t2=setTimeout(()=>Sync.push(),500);return}
   if(Sync.mode==='gas'){
     const f={state:()=>gasCall('saveState',Sync.cid,JSON.stringify(data)),
              vote:()=>gasCall('vote',Sync.cid,data.id),
@@ -653,6 +657,7 @@ function pushOp(op,data){
 }
 function queueSync(){
   if(!Sync.on)return;
+  if(Sync.mode==='blob'){Sync.dirty=true;clearTimeout(Sync.t2);Sync.t2=setTimeout(()=>Sync.push(),700);return}
   clearTimeout(Sync.t);
   Sync.t=setTimeout(()=>pushOp('state',snap()),Sync.mode==='gas'?600:160);
 }
@@ -695,6 +700,68 @@ function startPoll(){
   };
   tick(); Sync.poll=setInterval(tick,1200);
 }
+/* ====== MODO SALA EN LA NUBE (jsonblob) ====== */
+const ROOM=(location.search.match(/[?&]room=([A-Za-z0-9_-]+)/)||[])[1]||null;
+const BLOB=ROOM?('https://jsonblob.com/api/jsonBlob/'+ROOM):null;
+const DEL={players:[],cards:[]};
+function mergeState(remote,local){
+  const out={players:[],cards:[],thanks:[],del:{players:[],cards:[]}};
+  const rd=(remote&&remote.del)||{players:[],cards:[]};
+  out.del.players=[...new Set([...(rd.players||[]),...DEL.players])];
+  out.del.cards=[...new Set([...(rd.cards||[]),...DEL.cards])];
+  const byName={};
+  ((remote&&remote.players)||[]).forEach(p=>byName[p.name]=p);
+  (local.players||[]).forEach(p=>byName[p.name]=p);
+  out.players=Object.values(byName).filter(p=>!out.del.players.includes(p.name));
+  const byId={};
+  ((remote&&remote.cards)||[]).forEach(c=>byId[c.id]=c);
+  (local.cards||[]).forEach(c=>{
+    const r=byId[c.id];
+    byId[c.id]=Object.assign({},c,{votes:Math.max(c.votes||0,(r&&r.votes)||0)});
+  });
+  out.cards=Object.values(byId).filter(c=>!out.del.cards.includes(c.id));
+  const byT={};
+  ((remote&&remote.thanks)||[]).forEach(t=>byT[t.id]=t);
+  (local.thanks||[]).forEach(t=>byT[t.id]=t);
+  out.thanks=Object.values(byT);
+  return out;
+}
+async function blobGet(){
+  const r=await fetch(BLOB+'?t='+Date.now(),{cache:'no-store',headers:{'Accept':'application/json'}});
+  if(!r.ok)throw new Error('GET '+r.status);
+  return await r.json();
+}
+async function blobPut(data){
+  const r=await fetch(BLOB,{method:'PUT',headers:{'Content-Type':'application/json','Accept':'application/json'},
+    body:JSON.stringify(data)});
+  if(!r.ok)throw new Error('PUT '+r.status);
+}
+function startBlob(){
+  Sync.on=true; Sync.mode='blob'; liveBadge();
+  let busy=false;
+  const pull=async()=>{
+    if(busy||Sync.dirty)return; busy=true;
+    try{
+      const d=await blobGet();
+      const sig=JSON.stringify(d);
+      if(sig!==Sync.sig){Sync.sig=sig;applyState(d)}
+      Sync.err=0;
+    }catch(e){Sync.err=(Sync.err||0)+1;liveBadge()}
+    finally{busy=false}
+  };
+  Sync.push=async()=>{
+    Sync.dirty=false;
+    try{
+      let remote=null; try{remote=await blobGet()}catch(e){}
+      const merged=mergeState(remote,snap());
+      await blobPut(merged);
+      Sync.sig=JSON.stringify(merged);
+      CARDS=merged.cards; THANKS=merged.thanks;
+      Sync.err=0; liveBadge();
+    }catch(e){Sync.err=(Sync.err||0)+1;liveBadge()}
+  };
+  pull(); Sync.poll=setInterval(pull,2000);
+}
 function gas(){return (typeof google!=='undefined'&&google.script&&google.script.run)?google.script.run:null}
 function gasCall(fn,...args){
   return new Promise((res,rej)=>{
@@ -715,6 +782,7 @@ function startGas(){
   tick(); Sync.poll=setInterval(tick,3000);
 }
 async function initSync(){
+  if(BLOB){startBlob();return}
   if(gas()){startGas();return}
   if(!/^https?:$/.test(location.protocol))return;
   try{
@@ -811,7 +879,7 @@ function renderSlots(){
     el.appendChild(d);
   }
   $$('#slots .del').forEach(b=>b.onclick=e=>{e.stopPropagation();
-    const n=P[+b.dataset.i].name; P.splice(+b.dataset.i,1);
+    const n=P[+b.dataset.i].name; DEL.players.push(n); P.splice(+b.dataset.i,1);
     THANKS=THANKS.filter(t=>t.from!==n&&t.to!==n);
     recolor();renderSlots();gate();save()});
   $$('#slots .mood').forEach(m=>m.onclick=e=>{e.stopPropagation();
@@ -1168,7 +1236,7 @@ function pitEl(c,z){
     const i=ZONES.findIndex(x=>x.id===c.zone);
     c.zone=ZONES[(i+1)%ZONES.length].id; save(); renderZones();
   };
-  d.querySelector('[data-a=del]').onclick=()=>{CARDS=CARDS.filter(x=>x.id!==c.id);save();renderZones()};
+  d.querySelector('[data-a=del]').onclick=()=>{DEL.cards.push(c.id);CARDS=CARDS.filter(x=>x.id!==c.id);save();renderZones()};
   d.querySelector('[data-a=edit]').onclick=()=>{
     const pt=d.querySelector('.pt');
     const ta=document.createElement('textarea');
